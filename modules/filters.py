@@ -1,18 +1,5 @@
 #  Moon-Userbot - telegram userbot
 #  Copyright (C) 2020-present Moon Userbot Organization
-#
-#  This program is free software: you can redistribute it and/or modify
-#  it under the terms of the GNU General Public License as published by
-#  the Free Software Foundation, either version 3 of the License, or
-#  (at your option) any later version.
-
-#  This program is distributed in the hope that it will be useful,
-#  but WITHOUT ANY WARRANTY; without even the implied warranty of
-#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-#  GNU General Public License for more details.
-#
-#  You should have received a copy of the GNU General Public License
-#  along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 from pyrogram import Client, ContinuePropagation, errors, filters
 from pyrogram.types import (
@@ -26,6 +13,7 @@ from pyrogram.types import (
 from utils.db import db
 from utils.misc import modules_help, prefix
 from utils.scripts import format_exc
+import re
 
 
 def get_filters_chat(chat_id):
@@ -36,17 +24,29 @@ def set_filters_chat(chat_id, filters_):
     return db.set("core.filters", f"{chat_id}", filters_)
 
 
+# Whole-word regex match (case-insensitive)
 async def contains_filter(_, __, m):
-    return m.text and m.text.lower() in get_filters_chat(m.chat.id).keys()
+    if not m.text:
+        return False
+    text = m.text.lower()
+    filters_dict = get_filters_chat(m.chat.id)
+    return any(re.search(fr'\b{re.escape(k)}\b', text) for k in filters_dict)
 
 
 contains = filters.create(contains_filter)
 
 
-# noinspection PyTypeChecker
 @Client.on_message(contains)
 async def filters_main_handler(client: Client, message: Message):
-    value = get_filters_chat(message.chat.id)[message.text.lower()]
+    chat_filters = get_filters_chat(message.chat.id)
+    text = message.text.lower()
+
+    matched_key = next((k for k in chat_filters if re.search(fr'\b{re.escape(k)}\b', text)), None)
+
+    if matched_key is None:
+        raise ContinuePropagation
+
+    value = chat_filters[matched_key]
     try:
         await client.get_messages(int(value["CHAT_ID"]), int(value["MESSAGE_ID"]))
     except errors.RPCError as exc:
@@ -59,61 +59,13 @@ async def filters_main_handler(client: Client, message: Message):
         media_grouped_list = []
         for _ in messages_grouped:
             if _.photo:
-                if _.caption:
-                    media_grouped_list.append(
-                        InputMediaPhoto(_.photo.file_id, _.caption.HTML)
-                    )
-                else:
-                    media_grouped_list.append(InputMediaPhoto(_.photo.file_id))
+                media_grouped_list.append(InputMediaPhoto(_.photo.file_id, _.caption.HTML) if _.caption else InputMediaPhoto(_.photo.file_id))
             elif _.video:
-                if _.caption:
-                    if _.video.thumbs:
-                        media_grouped_list.append(
-                            InputMediaVideo(
-                                _.video.file_id,
-                                _.video.thumbs[0].file_id,
-                                _.caption.HTML,
-                            )
-                        )
-                    else:
-                        media_grouped_list.append(
-                            InputMediaVideo(_.video.file_id, _.caption.HTML)
-                        )
-                elif _.video.thumbs:
-                    media_grouped_list.append(
-                        InputMediaVideo(_.video.file_id, _.video.thumbs[0].file_id)
-                    )
-                else:
-                    media_grouped_list.append(InputMediaVideo(_.video.file_id))
+                media_grouped_list.append(InputMediaVideo(_.video.file_id, _.caption.HTML) if _.caption else InputMediaVideo(_.video.file_id))
             elif _.audio:
-                if _.caption:
-                    media_grouped_list.append(
-                        InputMediaAudio(_.audio.file_id, _.caption.HTML)
-                    )
-                else:
-                    media_grouped_list.append(InputMediaAudio(_.audio.file_id))
+                media_grouped_list.append(InputMediaAudio(_.audio.file_id, _.caption.HTML) if _.caption else InputMediaAudio(_.audio.file_id))
             elif _.document:
-                if _.caption:
-                    if _.document.thumbs:
-                        media_grouped_list.append(
-                            InputMediaDocument(
-                                _.document.file_id,
-                                _.document.thumbs[0].file_id,
-                                _.caption.HTML,
-                            )
-                        )
-                    else:
-                        media_grouped_list.append(
-                            InputMediaDocument(_.document.file_id, _.caption.HTML)
-                        )
-                elif _.document.thumbs:
-                    media_grouped_list.append(
-                        InputMediaDocument(
-                            _.document.file_id, _.document.thumbs[0].file_id
-                        )
-                    )
-                else:
-                    media_grouped_list.append(InputMediaDocument(_.document.file_id))
+                media_grouped_list.append(InputMediaDocument(_.document.file_id, _.caption.HTML) if _.caption else InputMediaDocument(_.document.file_id))
         await client.send_media_group(
             message.chat.id, media_grouped_list, reply_to_message_id=message.id
         )
@@ -131,44 +83,32 @@ async def filters_main_handler(client: Client, message: Message):
 async def filter_handler(client: Client, message: Message):
     try:
         if len(message.text.split()) < 2:
-            return await message.edit(
-                f"<b>Usage</b>: <code>{prefix}filter [name] (Reply required)</code>"
-            )
+            return await message.edit(f"<b>Usage</b>: <code>{prefix}filter [name] (Reply required)</code>")
         name = message.text.split(maxsplit=1)[1].lower()
         chat_filters = get_filters_chat(message.chat.id)
-        if name in chat_filters.keys():
-            return await message.edit(
-                f"<b>Filter</b> <code>{name}</code> already exists."
-            )
+        if name in chat_filters:
+            return await message.edit(f"<b>Filter</b> <code>{name}</code> already exists.")
         if not message.reply_to_message:
             return await message.edit("<b>Reply to message</b> please.")
 
         try:
             chat = await client.get_chat(db.get("core.notes", "chat_id", 0))
         except (errors.RPCError, ValueError, KeyError):
-            # group is not accessible or isn't created
-            chat = await client.create_supergroup(
-                "Moon_Userbot_Notes_Filters", "Don't touch this group, please"
-            )
+            chat = await client.create_supergroup("Moon_Userbot_Notes_Filters", "Don't touch this group, please")
             db.set("core.notes", "chat_id", chat.id)
 
         chat_id = chat.id
 
         if message.reply_to_message.media_group_id:
             get_media_group = [
-                _.id
-                for _ in await client.get_media_group(
+                _.id for _ in await client.get_media_group(
                     message.chat.id, message.reply_to_message.id
                 )
             ]
             try:
-                message_id = await client.forward_messages(
-                    chat_id, message.chat.id, get_media_group
-                )
+                message_id = await client.forward_messages(chat_id, message.chat.id, get_media_group)
             except errors.ChatForwardsRestricted:
-                await message.edit(
-                    "<b>Forwarding messages is restricted by chat admins</b>"
-                )
+                await message.edit("<b>Forwarding messages is restricted by chat admins</b>")
                 return
             filter_ = {
                 "MESSAGE_ID": str(message_id[1].id),
@@ -187,11 +127,8 @@ async def filter_handler(client: Client, message: Message):
             }
 
         chat_filters.update({name: filter_})
-
         set_filters_chat(message.chat.id, chat_filters)
-        return await message.edit(
-            f"<b>Filter</b> <code>{name}</code> has been added.",
-        )
+        return await message.edit(f"<b>Filter</b> <code>{name}</code> has been added.")
     except Exception as e:
         return await message.edit(format_exc(e))
 
@@ -200,37 +137,27 @@ async def filter_handler(client: Client, message: Message):
 async def filters_handler(_, message: Message):
     try:
         text = ""
-        for index, a in enumerate(get_filters_chat(message.chat.id).items(), start=1):
-            key, _ = a
+        for index, (key, _) in enumerate(get_filters_chat(message.chat.id).items(), start=1):
             key = key.replace("<", "").replace(">", "")
             text += f"{index}. <code>{key}</code>\n"
-        text = f"<b>Your filters in current chat</b>:\n\n" f"{text}"
-        text = text[:4096]
-        return await message.edit(text)
+        text = f"<b>Your filters in current chat</b>:\n\n{text}"
+        return await message.edit(text[:4096])
     except Exception as e:
         return await message.edit(format_exc(e))
 
 
-@Client.on_message(
-    filters.command(["delfilter", "filterdel", "fdel"], prefix) & filters.me
-)
+@Client.on_message(filters.command(["delfilter", "filterdel", "fdel"], prefix) & filters.me)
 async def filter_del_handler(_, message: Message):
     try:
         if len(message.text.split()) < 2:
-            return await message.edit(
-                f"<b>Usage</b>: <code>{prefix}fdel [name]</code>",
-            )
+            return await message.edit(f"<b>Usage</b>: <code>{prefix}fdel [name]</code>")
         name = message.text.split(maxsplit=1)[1].lower()
         chat_filters = get_filters_chat(message.chat.id)
-        if name not in chat_filters.keys():
-            return await message.edit(
-                f"<b>Filter</b> <code>{name}</code> doesn't exists.",
-            )
+        if name not in chat_filters:
+            return await message.edit(f"<b>Filter</b> <code>{name}</code> doesn't exist.")
         del chat_filters[name]
         set_filters_chat(message.chat.id, chat_filters)
-        return await message.edit(
-            f"<b>Filter</b> <code>{name}</code> has been deleted.",
-        )
+        return await message.edit(f"<b>Filter</b> <code>{name}</code> has been deleted.")
     except Exception as e:
         return await message.edit(format_exc(e))
 
@@ -239,18 +166,13 @@ async def filter_del_handler(_, message: Message):
 async def filter_search_handler(_, message: Message):
     try:
         if len(message.text.split()) < 2:
-            return await message.edit(
-                f"<b>Usage</b>: <code>{prefix}fsearch [name]</code>",
-            )
+            return await message.edit(f"<b>Usage</b>: <code>{prefix}fsearch [name]</code>")
         name = message.text.split(maxsplit=1)[1].lower()
         chat_filters = get_filters_chat(message.chat.id)
-        if name not in chat_filters.keys():
-            return await message.edit(
-                f"<b>Filter</b> <code>{name}</code> doesn't exists.",
-            )
+        if name not in chat_filters:
+            return await message.edit(f"<b>Filter</b> <code>{name}</code> doesn't exist.")
         return await message.edit(
-            f"<b>Trigger</b>:\n<code>{name}</code"
-            f">\n<b>Answer</b>:\n{chat_filters[name]}"
+            f"<b>Trigger</b>:\n<code>{name}</code>\n<b>Answer</b>:\n{chat_filters[name]}"
         )
     except Exception as e:
         return await message.edit(format_exc(e))
